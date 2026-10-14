@@ -1,0 +1,520 @@
+/* =====================================================================
+ * YangshiTV —— 央视频电视直播页注入脚本
+ * ---------------------------------------------------------------------
+ * 三件事：
+ *   1) 把页面里的主播放器钉成全屏，页面其余部分清掉
+ *   2) 清浮层（登录弹窗 / 下载 App 横幅 / 右侧节目单等）
+ *   3) 把「当前正在播什么」回报给原生层
+ *
+ * 硬性约定：**绝不写死任何 class 名 / id**。
+ * 央视频的 class 是构建时哈希出来的，随时会变。这里只用
+ * 「位置 + 尺寸 + getComputedStyle 结果」做启发式判断。
+ *
+ * 语法保持 ES5（老电视盒子内核可能很旧）。
+ * ===================================================================== */
+(function () {
+  'use strict';
+
+  var VERSION = 1;
+
+  /* 已经装过一遍就只跑一次 tick，避免重复注册定时器 */
+  if (window.__HTV__ && window.__HTV__.v === VERSION) {
+    try { window.__HTV__.tick(); } catch (e) {}
+    return;
+  }
+
+  /* ------------------------------------------------------------------
+   * 基础工具
+   * ------------------------------------------------------------------ */
+  function vw() {
+    return window.innerWidth ||
+      document.documentElement.clientWidth ||
+      (screen && screen.width) || 1920;
+  }
+
+  function vh() {
+    return window.innerHeight ||
+      document.documentElement.clientHeight ||
+      (screen && screen.height) || 1080;
+  }
+
+  function cs(el) {
+    try { return window.getComputedStyle(el); } catch (e) { return null; }
+  }
+
+  /* 只在值真的需要变时才写 style，减少无谓的样式重算 */
+  function force(el, prop, val) {
+    try {
+      if (el.style.getPropertyValue(prop) !== val) {
+        el.style.setProperty(prop, val, 'important');
+      }
+    } catch (e) {}
+  }
+
+  function isOurNode(el) {
+    return !!(el && el.id && el.id.indexOf('__htv_') === 0);
+  }
+
+  function isHiddenByUs(el) {
+    return el.getAttribute && el.getAttribute('data-htv-hidden') === '1';
+  }
+
+  /* ------------------------------------------------------------------
+   * 找主播放器
+   * 优先级：最大的 <video> → 最大的 <canvas> → 最大的 <iframe>
+   * （央视频若把播放器放进 iframe，主文档里就找不到 video）
+   * ------------------------------------------------------------------ */
+  function pickLargest(list) {
+    var best = null, bestArea = 0;
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+      if (!r || r.width < 80 || r.height < 60) continue;
+      var s = cs(el);
+      if (s && (s.display === 'none' || s.visibility === 'hidden')) continue;
+      var area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = el; }
+    }
+    return best;
+  }
+
+  function findPlayer() {
+    var v = pickLargest(document.querySelectorAll('video'));
+    if (v) return { el: v, kind: 'video' };
+    var c = pickLargest(document.querySelectorAll('canvas'));
+    if (c) return { el: c, kind: 'canvas' };
+    var f = pickLargest(document.querySelectorAll('iframe'));
+    if (f) return { el: f, kind: 'iframe' };
+    return null;
+  }
+
+  /* 从播放器往上收集祖先链（直到 body）
+     这条链是「必须保留」的：清浮层时绝不碰它，反而要把它撑满全屏 */
+  function buildChain(el) {
+    var chain = [];
+    var n = el;
+    var guard = 0;
+    while (n && n !== document.body && guard++ < 40) {
+      chain.push(n);
+      n = n.parentElement;
+    }
+    return chain;
+  }
+
+  function inChain(chain, el) {
+    for (var i = 0; i < chain.length; i++) { if (chain[i] === el) return true; }
+    return false;
+  }
+
+  /* ------------------------------------------------------------------
+   * 把播放器链路钉成全屏
+   * 从播放器往上，逐层压成 fixed/全屏，并给递增的 z-index，
+   * 保证它压在一切浮层之上。播放器最顶层用 object-fit: contain 保留比例。
+   * ------------------------------------------------------------------ */
+  function pinPlayer(player, chain) {
+    var i, el;
+
+    for (i = 0; i < chain.length; i++) {
+      el = chain[i];
+      force(el, 'position', 'fixed');
+      force(el, 'left', '0');
+      force(el, 'top', '0');
+      force(el, 'right', '0');
+      force(el, 'bottom', '0');
+      force(el, 'width', '100%');
+      force(el, 'height', '100%');
+      force(el, 'max-width', 'none');
+      force(el, 'max-height', 'none');
+      force(el, 'min-width', '0');
+      force(el, 'min-height', '0');
+      force(el, 'margin', '0');
+      force(el, 'padding', '0');
+      force(el, 'border', '0');
+      force(el, 'transform', 'none');
+      force(el, 'overflow', 'hidden');
+      force(el, 'background-color', '#000');
+      force(el, 'z-index', String(2147483000 + i));
+    }
+
+    /* 播放器本体铺满，保留原始画面比例 */
+    force(player, 'position', 'absolute');
+    force(player, 'left', '0');
+    force(player, 'top', '0');
+    force(player, 'width', '100%');
+    force(player, 'height', '100%');
+    force(player, 'max-width', 'none');
+    force(player, 'max-height', 'none');
+    force(player, 'margin', '0');
+    force(player, 'background-color', '#000');
+    force(player, 'object-fit', 'contain');
+    force(player, 'z-index', '2147483200');
+  }
+
+  /* ------------------------------------------------------------------
+   * 浮层判定 —— 全靠位置和尺寸，不看 class
+   * ------------------------------------------------------------------ */
+  function shouldHide(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (isOurNode(el)) return false;
+    if (isHiddenByUs(el)) return false;
+
+    var tag = el.tagName;
+    if (tag === 'VIDEO' || tag === 'CANVAS' || tag === 'SCRIPT' ||
+        tag === 'STYLE' || tag === 'LINK' || tag === 'HEAD' ||
+        tag === 'HTML' || tag === 'BODY') return false;
+
+    /* 里面装着播放器的容器，一律不碰 */
+    if (el.querySelector && el.querySelector('video,canvas')) return false;
+
+    var s = cs(el);
+    if (!s) return false;
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    if (parseFloat(s.opacity) === 0) return false;
+
+    var floating = (s.position === 'fixed' || s.position === 'absolute' ||
+                    s.position === 'sticky');
+    if (!floating) return false;
+
+    var r = el.getBoundingClientRect();
+    var W = vw(), H = vh();
+    if (r.width <= 0 || r.height <= 0) return false;
+
+    var wRatio = r.width / W;
+    var hRatio = r.height / H;
+    var areaRatio = wRatio * hRatio;
+
+    /* A. 几乎铺满整屏的浮层（登录墙 / 播放前广告 / 全屏遮罩） */
+    if (wRatio > 0.88 && hRatio > 0.82) return true;
+
+    /* B. 大面积浮层，含各种蒙层 */
+    if (areaRatio > 0.34) return true;
+
+    /* C. 右侧竖长条 —— 典型的就是节目单侧栏 */
+    if (wRatio > 0.20 && hRatio > 0.52) return true;
+
+    /* D. 横贯屏幕的窄条 —— 下载 App 横幅 / 登录提示条 */
+    if (s.position === 'fixed' &&
+        wRatio > 0.82 && hRatio >= 0.045 && hRatio < 0.22) return true;
+
+    /* E. 固定定位的弹窗盒子（有背景色、不大不小、浮在中间） */
+    if (s.position === 'fixed' &&
+        areaRatio > 0.06 && areaRatio <= 0.34 &&
+        r.width > W * 0.22 && r.height > H * 0.18) {
+      var bg = s.backgroundColor || '';
+      var hasBg = bg && bg !== 'transparent' &&
+                  bg.indexOf('rgba(0, 0, 0, 0)') === -1;
+      if (hasBg && parseFloat(s.zIndex) > 100) return true;
+    }
+
+    return false;
+  }
+
+  function hideIt(el) {
+    el.setAttribute('data-htv-hidden', '1');
+    force(el, 'display', 'none');
+  }
+
+  /* ------------------------------------------------------------------
+   * 清理清扫：递归往下走，遇到「播放器祖先链」就保护并继续深入
+   * （这样链内部的兄弟浮层，比如右侧节目单，也能被发现）
+   * ------------------------------------------------------------------ */
+  var sweepBudget = 0;
+
+  function sweep(node, depth, chain) {
+    if (!node || depth > 14 || sweepBudget <= 0) return;
+    var kids = node.children;
+    if (!kids) return;
+
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (sweepBudget-- <= 0) return;
+
+      if (inChain(chain, el)) {
+        /* 保护链，但继续往里钻 */
+        sweep(el, depth + 1, chain);
+        continue;
+      }
+      if (shouldHide(el)) {
+        hideIt(el);
+        continue;
+      }
+      if (depth < 9) sweep(el, depth + 1, chain);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 兜底：body / html 不允许滚动，背景压黑
+   * ------------------------------------------------------------------ */
+  function lockPage() {
+    var h = document.documentElement, b = document.body;
+    if (h) {
+      force(h, 'overflow', 'hidden');
+      force(h, 'background-color', '#000');
+      force(h, 'width', '100%');
+      force(h, 'height', '100%');
+    }
+    if (b) {
+      force(b, 'overflow', 'hidden');
+      force(b, 'background-color', '#000');
+      force(b, 'margin', '0');
+      force(b, 'padding', '0');
+      force(b, 'width', '100%');
+      force(b, 'height', '100%');
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 提取「正在播出的栏目」
+   * 思路：在播放器周围的若干层容器里找可见文字，排除时间戳、按钮词、
+   *       以及频道名本身（频道名原生层已经知道，传进来做过滤）。
+   * ------------------------------------------------------------------ */
+  var NOISE = {
+    '直播': 1, '回看': 1, '预约': 1, '全屏': 1, '退出全屏': 1,
+    '高清': 1, '超清': 1, '蓝光': 1, '标清': 1, '流畅': 1,
+    '登录': 1, '注册': 1, '下载': 1, '分享': 1, '收藏': 1, '更多': 1,
+    '节目单': 1, '切换频道': 1, '画中画': 1, '静音': 1, '音量': 1,
+    '央视频': 1, '电视': 1, '首页': 1, '推荐': 1, '赛事': 1,
+    '影视': 1, '节目库': 1, '搜索': 1, '刷新': 1, '重试': 1
+  };
+
+  var TIME_RE = /^\d{1,2}:\d{2}/;
+  var PURE_ASCII_RE = /^[\x00-\x7F]+$/;
+  var CJK_RE = /[\u4e00-\u9fa5]/;
+
+  function extractProgram(currentName) {
+    var player = currentPlayer;
+    if (!player) return '';
+
+    /* 以播放器往上第 4 层作为搜索半径 */
+    var root = player;
+    for (var i = 0; i < 4 && root.parentElement; i++) root = root.parentElement;
+    if (!root || !root.querySelectorAll) return '';
+
+    var nodes = root.querySelectorAll('span,div,p,a,em,i,b,h1,h2,h3,strong');
+    var best = '', bestScore = -1;
+    var limit = Math.min(nodes.length, 1200);
+
+    for (var n = 0; n < limit; n++) {
+      var el = nodes[n];
+      if (isHiddenByUs(el)) continue;
+      if (el.children && el.children.length > 0) continue;
+
+      var txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!txt) continue;
+      if (txt.length < 2 || txt.length > 42) continue;
+      if (!CJK_RE.test(txt)) continue;
+      if (TIME_RE.test(txt)) continue;
+      if (PURE_ASCII_RE.test(txt)) continue;
+      if (NOISE[txt]) continue;
+      if (currentName && txt.indexOf(currentName) > -1) continue;
+      if (/^(正在|已|共)\s*\d/.test(txt)) continue;
+
+      var s = cs(el);
+      if (!s || s.display === 'none' || s.visibility === 'hidden') continue;
+
+      var r = el.getBoundingClientRect();
+      if (r.width < 36 || r.height < 12) continue;
+      if (r.top < -20 || r.top > vh()) continue;
+
+      /* 打分：字号大、靠上、宽度适中 的更像节目标题 */
+      var fs = parseFloat(s.fontSize) || 14;
+      var score = fs * 10 - (r.top / vh()) * 40;
+      if (r.width > vw() * 0.75) score -= 30;
+      if (score > bestScore) { bestScore = score; best = txt; }
+    }
+
+    return best;
+  }
+
+  /* ------------------------------------------------------------------
+   * 回报原生层
+   * ------------------------------------------------------------------ */
+  var lastSentProgram = '';
+  var lastSentAt = 0;
+
+  function notify(type, payload) {
+    try {
+      if (window.HTVNative && window.HTVNative.onEvent) {
+        window.HTVNative.onEvent(type, payload ? String(payload) : '');
+      }
+    } catch (e) {}
+  }
+
+  function reportProgram() {
+    var name = '';
+    try { name = window.__HTV__.channelName || ''; } catch (e) {}
+
+    var p = '';
+    try { p = extractProgram(name); } catch (e) { p = ''; }
+
+    var now = Date.now();
+    if (p && p !== lastSentProgram) {
+      lastSentProgram = p;
+      lastSentAt = now;
+      notify('program', p);
+    } else if (!p && now - lastSentAt > 15000) {
+      lastSentAt = now;
+      notify('program', '');
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 播放就绪检测：currentTime 连续两次在推进，就算画面真的出来了
+   * ------------------------------------------------------------------ */
+  var currentPlayer = null;
+  var currentKind = '';
+  var lastTime = -1;
+  var progressHits = 0;
+  var readyNotified = false;
+
+  function checkReady() {
+    if (!currentPlayer || currentKind !== 'video') return;
+    var t = 0;
+    try { t = currentPlayer.currentTime || 0; } catch (e) { t = 0; }
+
+    if (t > 0.25 && t !== lastTime) {
+      progressHits++;
+      lastTime = t;
+      if (progressHits >= 2 && !readyNotified) {
+        readyNotified = true;
+        notify('ready', String(Math.round(t * 10) / 10));
+      }
+    } else if (t === lastTime && t > 0) {
+      /* 卡住了，不重置计数，避免反复触发 */
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 主循环
+   * ------------------------------------------------------------------ */
+  function tick() {
+    var found = findPlayer();
+    if (!found) return;
+
+    var el = found.el;
+
+    /* 播放器元素换人了（SPA 换台后重建）→ 状态重置 */
+    if (el !== currentPlayer) {
+      currentPlayer = el;
+      currentKind = found.kind;
+      lastTime = -1;
+      progressHits = 0;
+      readyNotified = false;
+      lastSentProgram = '';
+    }
+
+    var chain = buildChain(el);
+    pinPlayer(el, chain);
+    lockPage();
+
+    sweepBudget = 3000;
+    sweep(document.body, 0, chain);
+  }
+
+  /* ------------------------------------------------------------------
+   * 换台：优先走前端路由，不整页刷新
+   * 央视频是 hash 路由 SPA —— 改 location.hash 会触发 hashchange，
+   * 路由组件重挂载、播放器重载，而页面本身不动。
+   * ------------------------------------------------------------------ */
+  function switchTo(pid) {
+    if (!pid) return false;
+    var want = '#/tv/home?pid=' + pid;
+    try {
+      var h = window.location.hash || '';
+      if (h.indexOf('pid=') > -1) {
+        var next = h.replace(/pid=\d+/, 'pid=' + pid);
+        if (next === h) next = want;
+        window.location.hash = next;
+        return true;
+      }
+      /* 当前不是 hash 路由形态：用 pushState 顶上去，再手动派发事件 */
+      if (window.history && window.history.pushState) {
+        window.history.pushState({}, '', '/tv/home?pid=' + pid);
+        try {
+          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        } catch (e) {
+          var ev = document.createEvent('Event');
+          ev.initEvent('popstate', true, true);
+          window.dispatchEvent(ev);
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* 强制整页跳转（最后兜底，原生会用黑遮罩盖住刷新过程） */
+  function hardLoad(pid) {
+    if (!pid) return;
+    try { window.location.href = '/#/tv/home?pid=' + pid; } catch (e) {}
+  }
+
+  /* ------------------------------------------------------------------
+   * 对外接口
+   * ------------------------------------------------------------------ */
+  window.__HTV__ = {
+    v: VERSION,
+    channelName: '',
+
+    tick: tick,
+
+    switchTo: function (pid) { return switchTo(pid); },
+    hardLoad: hardLoad,
+
+    /* 原生换台前调用：重置就绪标记，好让黑遮罩能正确等画面 */
+    beginSwitch: function (name) {
+      window.__HTV__.channelName = name || '';
+      lastTime = -1;
+      progressHits = 0;
+      readyNotified = false;
+      lastSentProgram = '';
+    },
+
+    restore: function () {
+      var list = document.querySelectorAll('[data-htv-hidden="1"]');
+      for (var i = 0; i < list.length; i++) {
+        list[i].removeAttribute('data-htv-hidden');
+        list[i].style.removeProperty('display');
+      }
+      return list.length;
+    },
+
+    diag: function () {
+      return JSON.stringify({
+        player: currentKind,
+        hasPlayer: !!currentPlayer,
+        program: lastSentProgram,
+        hidden: document.querySelectorAll('[data-htv-hidden="1"]').length,
+        hash: window.location.hash || ''
+      });
+    }
+  };
+
+  /* ------------------------------------------------------------------
+   * 启动
+   * ------------------------------------------------------------------ */
+  function boot() {
+    tick();
+    setInterval(tick, 800);          // 浮层是动态弹的，得持续清
+    setInterval(checkReady, 500);
+    setInterval(reportProgram, 4000);
+
+    /* 页面尺寸变了（电视上少见，但盒子切分辨率时会）→ 立刻重整 */
+    window.addEventListener('resize', function () { tick(); }, false);
+
+    /* SPA 换台不触发 load，但会触发 hashchange，立刻重整一次 */
+    window.addEventListener('hashchange', function () {
+      setTimeout(tick, 120);
+      setTimeout(tick, 600);
+      setTimeout(tick, 1500);
+    }, false);
+  }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    boot();
+  } else {
+    document.addEventListener('DOMContentLoaded', boot, false);
+  }
+})();

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_red">#E8342B</color>
+    <color name="screen_bg">#000000</color>
+    <color name="panel_bg">#1A1A1E</color>
+    <color name="text_primary">#EDEDED</color>
+    <color name="text_dim">#9A9A9A</color>
+</resources>

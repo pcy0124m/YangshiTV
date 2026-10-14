@@ -1,0 +1,101 @@
+name: Build & Sign Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 发布 Release 需要写权限；新建仓库的默认 token 往往是只读，不加这段会 403
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      KEYSTORE_PATH: app/release.keystore
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - name: Check signing secrets
+        run: |
+          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "::error::KEYSTORE_BASE64 未配置，无法签名"
+            exit 1
+          fi
+          if [ -z "${{ secrets.KEYSTORE_PASSWORD }}" ]; then
+            echo "::error::KEYSTORE_PASSWORD 未配置"
+            exit 1
+          fi
+
+      - name: Decode signing keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+          ls -l app/release.keystore
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build signed release
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK is signed
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          echo "built: $APK"
+          echo "$APK" | grep -q "unsigned" && { echo "::error::产出的是未签名包"; exit 1; } || true
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/*.apk release-assets/TV-Live-release.apk
+          ls -l release-assets/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: release-assets/*.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v0.1.${GITHUB_RUN_NUMBER}"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "电视直播 $TAG" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA"
+          fi

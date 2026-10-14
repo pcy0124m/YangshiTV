@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# 签名密钥绝不进仓库
+*.jks
+*.keystore
+release.keystore
+ks.b64
