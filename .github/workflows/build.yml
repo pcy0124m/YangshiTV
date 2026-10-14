@@ -21,8 +21,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # 注意：不要用该 action 的默认 packages，它默认要装 "tools"，
+      # 而新 cmdline-tools 已移除该包 -> "Failed to find package 'tools'"
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
 
       - name: Install SDK packages
         run: |
