@@ -502,6 +502,21 @@
       return list.length;
     },
 
+    /*
+     * 超时兜底用：画面是不是其实早就出来了？
+     *
+     * 真机上踩过 —— 视频已经在播，ready 信号却丢在路上，
+     * 原生层干等 20 秒后还要去切备用源，等于把好好的直播打断。
+     * 所以超时前先问一句这个。
+     */
+    isPlaying: function () {
+      try {
+        var v = currentPlayer || document.querySelector('video');
+        if (!v) return false;
+        return (v.readyState || 0) >= 3 && !v.paused;
+      } catch (e) { return false; }
+    },
+
     diag: function () {
       return JSON.stringify({
         player: currentKind,

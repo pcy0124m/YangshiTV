@@ -392,9 +392,23 @@ class MainActivity : Activity() {
         showCurtain(String.format("%02d", ch.no), ch.name, "正在启动…")
 
         switchSeq++
+        val seq = switchSeq
         awaitingReady = true
         readyArmed = false
         failState = false
+
+        /*
+         * 这行冷却不能少。
+         *
+         * readyArmed 是「现在允许接受 ready 信号」的闸门：换台前先关掉，
+         * 600ms 后再开，免得换台途中残留的 ready 把遮罩提前撤了。
+         *
+         * v1.0.2 之前这里漏了下面这一行 —— 首次启动时 readyArmed 永远是 false，
+         * 页面发来的 ready 全被丢弃。视频其实已经在播（真机诊断显示
+         * 「video 1个 就绪4/播放 1920x1080」），遮罩却一直挂着，
+         * 20 秒后还判超时去切备用源。这就是「地址修对了仍然黑屏」的真凶。
+         */
+        ui.postDelayed({ if (seq == switchSeq) readyArmed = true }, 600)
 
         web.loadUrl(ch.homeUrl)
         scheduleBackup(ch)
@@ -450,24 +464,52 @@ class MainActivity : Activity() {
             if (seq != switchSeq || !awaitingReady) return@Runnable
 
             /*
-             * 电视上没有 logcat 可看，用户只能说「黑的」。
-             * 所以超时的同时把页面真实状态念到屏幕上 —— 截一张图就知道卡在哪一环。
+             * 双保险：超时了 ≠ 真的没画面。
+             *
+             * 真机上遇到过 ready 信号丢在路上、而视频其实已经在播的情况，
+             * 这时候还去切备用源，等于把好好的直播打断。
+             * 所以先问一句「现在到底在不在播」，在播就撤遮罩收工。
              */
-            if (ch.backup.isEmpty()) {
-                failState = true
-                captureDiagnose("加载超时。\n按【OK】重试   ·   按【返回】换台")
-            } else {
-                web.loadUrl(ch.backup)
-                captureDiagnose("主源超时，正在切换备用源…")
-            }
-
-            /* 备用源再给 20 秒 */
-            backupTask = Runnable {
-                if (seq == switchSeq && awaitingReady && !failState) {
-                    failState = true
-                    captureDiagnose("备用源也没能出画面。\n按【OK】重试   ·   按【返回】换台")
+            askPlaying { playing ->
+                if (seq != switchSeq || !awaitingReady) return@askPlaying
+                if (playing) {
+                    awaitingReady = false
+                    failState = false
+                    hideCurtain()
+                } else {
+                    doBackup(ch, seq)
                 }
-            }.also { ui.postDelayed(it, 20_000) }
+            }
+        }.also { ui.postDelayed(it, 20_000) }
+    }
+
+    /** 页面上现在是不是真的有画面在动 */
+    private fun askPlaying(onResult: (Boolean) -> Unit) {
+        evalJs(
+            "(function(){try{return window.__HTV__?window.__HTV__.isPlaying():false}" +
+                    "catch(e){return false}})()"
+        ) { r ->
+            val s = r?.trim() ?: ""
+            onResult(s == "true" || s == "\"true\"")
+        }
+    }
+
+    private fun doBackup(ch: Channel, seq: Int) {
+        if (ch.backup.isEmpty()) {
+            failState = true
+            captureDiagnose("加载超时。\n按【OK】重试   ·   按【返回】换台")
+            return
+        }
+
+        web.loadUrl(ch.backup)
+        captureDiagnose("主源超时，正在切换备用源…")
+
+        /* 备用源再给 20 秒 */
+        backupTask = Runnable {
+            if (seq == switchSeq && awaitingReady && !failState) {
+                failState = true
+                captureDiagnose("备用源也没能出画面。\n按【OK】重试   ·   按【返回】换台")
+            }
         }.also { ui.postDelayed(it, 20_000) }
     }
 
