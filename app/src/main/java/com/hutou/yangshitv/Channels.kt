@@ -18,14 +18,21 @@ data class Channel(
     val pid: String,
     val backup: String
 ) {
-    /** 央视频频道的完整地址（hash 路由形态，便于不刷新换台） */
+    /**
+     * 央视频直播页的完整地址。
+     *
+     * ⚠️ 必须是 **query 形态** `?pid=`，不能用 hash 形态 `#/tv/home?pid=`。
+     * 实测（桌面 Chrome 探针）：这个站点是 history 路由，
+     *   - `/tv/home?pid=x` → 3~6 秒后播放器起来，video 正常播放
+     *   - `/#/tv/home?pid=x` → 路由匹配不上，落到首页 `pc-index`，**页面里一个 video 都没有**，
+     *     注入脚本永远等不到 ready，最后表现为「黑屏 + 主源超时」
+     */
     val homeUrl: String
-        get() = "https://www.yangshipin.cn/#/tv/home?pid=$pid"
+        get() = "https://www.yangshipin.cn/tv/home?pid=$pid"
 }
 
 /** 频道表来自 assets/channels.json，要加台改那个文件就行，不用动代码 */
 object ChannelStore {
-
     private var cache: List<Channel>? = null
 
     fun channels(ctx: Context): List<Channel> {

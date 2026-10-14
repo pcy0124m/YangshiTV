@@ -61,7 +61,6 @@ class MainActivity : Activity() {
     private var switchSeq = 0
 
     private var backupTask: Runnable? = null
-    private var routeFallbackTask: Runnable? = null
 
     private var engineTooOld = false
     private var failState = false
@@ -115,7 +114,6 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         cancelBackup()
-        cancelRouteFallback()
         try {
             web.stopLoading()
             web.loadUrl("about:blank")
@@ -418,7 +416,6 @@ class MainActivity : Activity() {
         showCurtainFor(ch)
 
         cancelBackup()
-        cancelRouteFallback()
 
         switchSeq++
         val seq = switchSeq
@@ -429,35 +426,20 @@ class MainActivity : Activity() {
         /* 冷却 600ms：丢掉换台前残留的 ready 信号 */
         ui.postDelayed({ if (seq == switchSeq) readyArmed = true }, 600)
 
-        /* 通知页面：要换台了，重置它就绪标记 */
-        evalJs("try{window.__HTV__&&window.__HTV__.beginSwitch(${jsString(ch.name)})}catch(e){}")
+        /*
+         * 换台就是整页加载，没有更快的路。
+         *
+         * 实测（桌面 Chrome 探针）排除掉了两条「不刷新」的尝试：
+         *   ① 改 location.hash      —— 这站是 history 路由，hash 变了播放器纹丝不动
+         *   ② pushState + popstate  —— URL 变了，但 video 的 blob src 没变、
+         *                              currentTime 照常往前走，还是同一个流
+         * 播放器地址是带 token 二次请求拿的，只有整页重走一遍才会换台。
+         * 好在有黑遮罩盖着，用户看不到刷新过程。
+         */
+        web.loadUrl(ch.homeUrl)
 
-        /* 第一优先级：走前端路由，页面本身不动、播放器组件重载 */
-        evalJs(
-            "(function(){try{return window.__HTV__?window.__HTV__.switchTo('${ch.pid}'):false}" +
-                    "catch(e){return false}})()"
-        ) { r ->
-            if (resultIsTrue(r)) {
-                /* 路由调成功了，但未必真的生效 —— 1.8 秒还没画面就整页兜底 */
-                routeFallbackTask = Runnable {
-                    if (seq == switchSeq && awaitingReady) {
-                        web.loadUrl(ch.homeUrl)
-                    }
-                }.also { ui.postDelayed(it, 1800) }
-            } else {
-                /* 路由压根不可用，直接整页加载（黑遮罩盖着，用户看不到闪） */
-                web.loadUrl(ch.homeUrl)
-            }
-        }
-
-        /* 第三优先级：20 秒总超时 → 备用源 */
+        /* 20 秒总超时 → 备用源 */
         scheduleBackup(ch)
-    }
-
-    private fun resultIsTrue(r: String?): Boolean {
-        if (r == null) return false
-        val t = r.trim()
-        return t == "true" || t == "\"true\""
     }
 
     private fun scheduleBackup(ch: Channel) {
@@ -489,11 +471,6 @@ class MainActivity : Activity() {
     private fun cancelBackup() {
         backupTask?.let { ui.removeCallbacks(it) }
         backupTask = null
-    }
-
-    private fun cancelRouteFallback() {
-        routeFallbackTask?.let { ui.removeCallbacks(it) }
-        routeFallbackTask = null
     }
 
     /* ================================================================== */

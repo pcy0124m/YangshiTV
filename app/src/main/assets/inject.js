@@ -10,12 +10,21 @@
  * 央视频的 class 是构建时哈希出来的，随时会变。这里只用
  * 「位置 + 尺寸 + getComputedStyle 结果」做启发式判断。
  *
+ * 页面事实（2026-10-14 用桌面 Chrome 探针实测，别再猜）：
+ *   - 地址必须是 `/tv/home?pid=xxx`（query 形态）。
+ *     `/#/tv/home?pid=xxx` 匹配不到路由 → 落到首页 pc-index，页面里没有 video。
+ *   - 这站是 **history 路由**，不是 hash 路由。
+ *   - 播放器是 **video.js**：<video class="video-js vjs-default-skin">，
+ *     实测 3~6 秒起来，1920x1080，src 是 blob:（MSE），duration 约 20 秒（直播滑窗）。
+ *   - 直播页是列表页：#app > .comPadding > .tv-home > .tv-home-list，
+ *     播放器只占一块（762x430），旁边挂着频道列表 —— 所以必须剪枝，不能只清浮层。
+ *
  * 语法保持 ES5（老电视盒子内核可能很旧）。
  * ===================================================================== */
 (function () {
   'use strict';
 
-  var VERSION = 1;
+  var VERSION = 2;
 
   /* 已经装过一遍就只跑一次 tick，避免重复注册定时器 */
   if (window.__HTV__ && window.__HTV__.v === VERSION) {
@@ -107,13 +116,18 @@
   }
 
   /* ------------------------------------------------------------------
-   * 把播放器链路钉成全屏
-   * 从播放器往上，逐层压成 fixed/全屏，并给递增的 z-index，
-   * 保证它压在一切浮层之上。播放器最顶层用 object-fit: contain 保留比例。
+   * 把播放器链路钉成全屏，并且**只留播放器这一条枝**
+   *
+   * 央视频直播页其实是个"列表页"：#app > .comPadding > .tv-home > .tv-home-list，
+   * 播放器只是里面的一块（实测 762x430），旁边和下面还挂着频道列表、导航。
+   * 所以光把链撑满还不够 —— 那些 static 定位的旁支节点，
+   * shouldHide() 是不认的（它只处理 fixed/absolute/sticky 的浮层），会露在播放器边上。
+   * 这里对链上每一层做"剪枝"：只保留通往播放器的那一根枝，其余兄弟全部砍掉。
    * ------------------------------------------------------------------ */
   function pinPlayer(player, chain) {
     var i, el;
 
+    /* 1) 整条链撑满全屏，逐层叠 z-index，保证压在一切浮层之上 */
     for (i = 0; i < chain.length; i++) {
       el = chain[i];
       force(el, 'position', 'fixed');
@@ -136,7 +150,7 @@
       force(el, 'z-index', String(2147483000 + i));
     }
 
-    /* 播放器本体铺满，保留原始画面比例 */
+    /* 2) 播放器本体铺满，保留原始画面比例（左右可能留黑边） */
     force(player, 'position', 'absolute');
     force(player, 'left', '0');
     force(player, 'top', '0');
@@ -148,6 +162,20 @@
     force(player, 'background-color', '#000');
     force(player, 'object-fit', 'contain');
     force(player, 'z-index', '2147483200');
+
+    /* 3) 剪枝：从播放器的父层一路剪到 body，每层只留通往播放器的那一根枝 */
+    for (i = 1; i <= chain.length; i++) {
+      var parent = (i === chain.length) ? document.body : chain[i];
+      if (!parent || !parent.children) continue;
+      var keep = chain[i - 1];
+      var kids = parent.children;
+      for (var k = 0; k < kids.length; k++) {
+        var c = kids[k];
+        if (c === keep) continue;
+        if (isOurNode(c)) continue;
+        hideIt(c);
+      }
+    }
   }
 
   /* ------------------------------------------------------------------
@@ -412,43 +440,26 @@
   }
 
   /* ------------------------------------------------------------------
-   * 换台：优先走前端路由，不整页刷新
-   * 央视频是 hash 路由 SPA —— 改 location.hash 会触发 hashchange，
-   * 路由组件重挂载、播放器重载，而页面本身不动。
+   * 换台：只能整页跳转
+   *
+   * 实测（桌面 Chrome 探针，两次独立验证）排除掉了两条"不刷新"的路：
+   *   ① 改 location.hash           → 这站是 history 路由，hash 变了播放器纹丝不动
+   *   ② pushState + 派发 popstate   → URL 变了，但 video 的 blob src 没变、
+   *                                   currentTime 照常往前走，还是同一个流
+   * 直播地址是带 token 二次请求拿到的，只有整页重走一遍才会真的换台。
+   * 原生侧会用黑遮罩盖住整个刷新过程，所以观感上没有闪白。
+   *
+   * 注意地址必须是 query 形态：`/tv/home?pid=`，
+   * 用 `/#/tv/home?pid=` 会路由匹配失败落到首页，页面里一个 video 都没有。
    * ------------------------------------------------------------------ */
-  function switchTo(pid) {
+  function hardLoad(pid) {
     if (!pid) return false;
-    var want = '#/tv/home?pid=' + pid;
     try {
-      var h = window.location.hash || '';
-      if (h.indexOf('pid=') > -1) {
-        var next = h.replace(/pid=\d+/, 'pid=' + pid);
-        if (next === h) next = want;
-        window.location.hash = next;
-        return true;
-      }
-      /* 当前不是 hash 路由形态：用 pushState 顶上去，再手动派发事件 */
-      if (window.history && window.history.pushState) {
-        window.history.pushState({}, '', '/tv/home?pid=' + pid);
-        try {
-          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-        } catch (e) {
-          var ev = document.createEvent('Event');
-          ev.initEvent('popstate', true, true);
-          window.dispatchEvent(ev);
-        }
-        return true;
-      }
-      return false;
+      window.location.href = '/tv/home?pid=' + pid;
+      return true;
     } catch (e) {
       return false;
     }
-  }
-
-  /* 强制整页跳转（最后兜底，原生会用黑遮罩盖住刷新过程） */
-  function hardLoad(pid) {
-    if (!pid) return;
-    try { window.location.href = '/#/tv/home?pid=' + pid; } catch (e) {}
   }
 
   /* ------------------------------------------------------------------
@@ -460,7 +471,8 @@
 
     tick: tick,
 
-    switchTo: function (pid) { return switchTo(pid); },
+    /* switchTo 这个名字保留做别名 —— 换台本质上就是整页跳转 */
+    switchTo: function (pid) { return hardLoad(pid); },
     hardLoad: hardLoad,
 
     /* 原生换台前调用：重置就绪标记，好让黑遮罩能正确等画面 */
@@ -504,11 +516,10 @@
     /* 页面尺寸变了（电视上少见，但盒子切分辨率时会）→ 立刻重整 */
     window.addEventListener('resize', function () { tick(); }, false);
 
-    /* SPA 换台不触发 load，但会触发 hashchange，立刻重整一次 */
-    window.addEventListener('hashchange', function () {
-      setTimeout(tick, 120);
-      setTimeout(tick, 600);
-      setTimeout(tick, 1500);
+    /* 万一页面内部自己走了路由（用户误点到列表），立刻重整一次 */
+    window.addEventListener('popstate', function () {
+      setTimeout(tick, 200);
+      setTimeout(tick, 900);
     }, false);
   }
 
