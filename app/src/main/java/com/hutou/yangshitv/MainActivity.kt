@@ -62,6 +62,10 @@ class MainActivity : Activity() {
     private var switchSeq = 0
 
     private var backupTask: Runnable? = null
+    private var epgTask: Runnable? = null
+
+    /** 当前节目单是哪一天拉的，用来识别跨天 */
+    private var epgDate = ""
 
     private var engineTooOld = false
     private var failState = false
@@ -107,6 +111,7 @@ class MainActivity : Activity() {
 
         checkEngineThenStart()
         loadAllPrograms()
+        scheduleProgramRefresh()
     }
 
     /**
@@ -120,6 +125,7 @@ class MainActivity : Activity() {
     private fun loadAllPrograms() {
         if (channels.isEmpty()) return
         val date = Epg.today()
+        epgDate = date
         val list = channels
 
         val pool = Executors.newFixedThreadPool(4) { r ->
@@ -130,10 +136,36 @@ class MainActivity : Activity() {
             val pid = ch.pid
             pool.execute {
                 val name = Epg.currentName(pid, date) ?: return@execute
-                ui.post { overlay.setProgram(idx, name) }
+                ui.post { overlay.setEpgProgram(idx, name) }
             }
         }
         pool.shutdown()
+    }
+
+    /**
+     * 定时刷新节目名。
+     *
+     * 节目是会换场的（19:00 的《新闻联播》过点就该变成下一档），
+     * 只在启动时拉一次的话，名字会一直停在打开 App 那一刻。
+     *
+     * 但也不能每分钟打 48 个请求 —— 节目单一天只拉一次，之后全部在本地按时间重算，
+     * 所以这个定时任务绝大多数时候是零网络开销的纯本地计算。
+     * 只有跨天（缓存 key 变了）才重新走一次网络。
+     */
+    private fun scheduleProgramRefresh() {
+        epgTask?.let { ui.removeCallbacks(it) }
+        epgTask = Runnable {
+            val d = Epg.today()
+            if (d != epgDate) {
+                loadAllPrograms()          // 跨天了，重新拉
+            } else {
+                for ((i, ch) in channels.withIndex()) {
+                    val n = Epg.cachedName(ch.pid, d) ?: continue
+                    overlay.setEpgProgram(i, n)
+                }
+            }
+            scheduleProgramRefresh()
+        }.also { ui.postDelayed(it, 60_000) }
     }
 
     override fun onResume() {
@@ -143,6 +175,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         cancelBackup()
+        epgTask?.let { ui.removeCallbacks(it) }
+        epgTask = null
         try {
             web.stopLoading()
             web.loadUrl("about:blank")
@@ -314,7 +348,17 @@ class MainActivity : Activity() {
                 }
             }
             "program" -> {
-                overlay.setProgram(currentIndex, payload)
+                /*
+                 * 网页回传的节目名只做补充，且空值一律丢弃。
+                 *
+                 * 注入脚本每 4 秒从 DOM 里启发式猜一次节目名，猜不到就发空串过来。
+                 * 页面被剪枝成只剩播放器之后，它基本永远猜不到 —— 也就是说
+                 * 每换一个台，4 秒内就会有一个空串到达。旧版直接写进界面，
+                 * 于是每换一个台就抹掉一个已经查好的节目名（点一个消一个）。
+                 */
+                if (payload.isNotEmpty()) {
+                    overlay.setPageProgram(currentIndex, payload)
+                }
             }
         }
     }

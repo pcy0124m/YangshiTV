@@ -24,7 +24,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 2;
+  var VERSION = 3;
 
   /* 已经装过一遍就只跑一次 tick，避免重复注册定时器 */
   if (window.__HTV__ && window.__HTV__.v === VERSION) {
@@ -367,7 +367,6 @@
   }, true);
 
   var lastSentProgram = '';
-  var lastSentAt = 0;
 
   function notify(type, payload) {
     try {
@@ -377,6 +376,18 @@
     } catch (e) {}
   }
 
+  /*
+   * ⚠️ 只发**非空**的节目名。
+   *
+   * 踩过的坑：这里原来还有个 else 分支，猜不到就每 15 秒发一次空串，
+   * 想让原生层「清掉过期的名字」。结果页面被剪枝成只剩播放器之后，
+   * extractProgram() 基本永远返回空 —— 于是变成「每换一个台，
+   * 4 秒内必到一个空串」，原生层把已经查好的 EPG 名字全抹了。
+   * 表现就是频道列表里「点一个台，消一个节目名」。
+   *
+   * 节目名的权威来源是 EPG 接口（原生层直接查，48 个台都有），
+   * 这里只作为补充：有就报，没有就闭嘴。
+   */
   function reportProgram() {
     var name = '';
     try { name = window.__HTV__.channelName || ''; } catch (e) {}
@@ -384,14 +395,9 @@
     var p = '';
     try { p = extractProgram(name); } catch (e) { p = ''; }
 
-    var now = Date.now();
     if (p && p !== lastSentProgram) {
       lastSentProgram = p;
-      lastSentAt = now;
       notify('program', p);
-    } else if (!p && now - lastSentAt > 15000) {
-      lastSentAt = now;
-      notify('program', '');
     }
   }
 

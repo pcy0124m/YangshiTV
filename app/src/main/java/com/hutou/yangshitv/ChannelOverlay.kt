@@ -38,7 +38,19 @@ class ChannelOverlay(context: Context) : FrameLayout(context) {
     private val progViews = ArrayList<TextView>()
 
     private var channels: List<Channel> = emptyList()
-    private var programs = HashMap<Int, String>()
+
+    /**
+     * 节目名有两个来源，分开存，**谁都不许覆盖谁** —— 这是踩过的坑。
+     *
+     *   epgNames  —— EPG 接口查到的，48 个台都有，主数据源
+     *   pageNames —— 网页回传的，只有当前台可能有，且页面被剪枝后常常是空的
+     *
+     * 旧版只用一个 map，网页每 4 秒回传一次「节目名」、拿不到就是空串，
+     * 空串直接把 EPG 查到的名字冲成了「—」。表现就是：
+     * **点一个台，列表里那行的节目名消一个。**
+     */
+    private val epgNames = HashMap<Int, String>()
+    private val pageNames = HashMap<Int, String>()
 
     val panelWidth: Int get() = px(PANEL_W)
 
@@ -168,23 +180,42 @@ class ChannelOverlay(context: Context) : FrameLayout(context) {
 
             /*
              * 行是 panel.post 里才真正建出来的，而节目单是从网络来的 —— 谁先到不一定。
-             * 要是节目名比行先到，setProgram 那会儿 progViews 还是空的，名字就丢了。
+             * 要是节目名比行先到，setEpgProgram 那会儿 progViews 还是空的，名字就丢了。
              * 这里补写一遍。
              */
-            for ((idx, p) in programs) {
-                if (idx in progViews.indices && !p.isNullOrEmpty()) {
-                    progViews[idx].text = p
-                }
+            for (idx in epgNames.keys + pageNames.keys) {
+                renderProgram(idx)
             }
         }
     }
 
-    /** 页面回传 / 网络查到的「正在播什么」写进对应行 */
-    fun setProgram(index: Int, program: String) {
-        programs[index] = program
-        if (index in progViews.indices) {
-            progViews[index].text = if (program.isEmpty()) "—" else program
-        }
+    /**
+     * EPG 接口查到的「正在播什么」（主数据源，48 个台都有）。
+     * 空值直接丢掉 —— 接口偶尔会返回空名，不能拿它去覆盖已有的名字。
+     */
+    fun setEpgProgram(index: Int, program: String) {
+        if (program.isEmpty()) return
+        epgNames[index] = program
+        renderProgram(index)
+    }
+
+    /**
+     * 网页回传的「正在播什么」（补充源，只有当前台可能有）。
+     *
+     * 只在 EPG 没给出名字时才显示。页面的文字是从 DOM 里启发式猜出来的，
+     * 猜不到就是空串 —— 空串绝不能写进界面，否则就会把 EPG 的名字抹掉。
+     */
+    fun setPageProgram(index: Int, program: String) {
+        if (program.isEmpty()) return
+        pageNames[index] = program
+        if (epgNames[index].isNullOrEmpty()) renderProgram(index)
+    }
+
+    /** 显示优先级：EPG > 网页 */
+    private fun renderProgram(index: Int) {
+        if (index !in progViews.indices) return
+        val v = epgNames[index] ?: pageNames[index]
+        progViews[index].text = if (v.isNullOrEmpty()) "—" else v
     }
 
     fun markSelected(index: Int) {

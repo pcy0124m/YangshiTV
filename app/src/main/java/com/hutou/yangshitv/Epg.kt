@@ -53,11 +53,33 @@ object Epg {
     /** 当前正在播的节目名；拿不到返回 null（调用方保持原样即可） */
     fun currentName(pid: String, date: String): String? {
         val list = list(pid, date) ?: return null
+        return pickNow(list)
+    }
+
+    /**
+     * 只用内存里已有的节目表重算「正在播什么」，**不发网络请求**。
+     *
+     * 节目单一天只拉一次就够了 —— 之后节目换场（比如 19:00 从《新闻联播》
+     * 切到下一档），本地按时间重算即可，没必要再打一次接口。
+     * 拿不到返回 null，调用方保持原样（宁可不刷新，也不能刷成空）。
+     */
+    fun cachedName(pid: String, date: String): String? {
+        val list = cache["$pid/$date"] ?: return null
+        return pickNow(list)
+    }
+
+    private fun pickNow(list: List<Prog>): String? {
         val now = System.currentTimeMillis() / 1000L
+        var latest: Prog? = null
+
         for (p in list) {
             if (now >= p.start && now < p.end) return p.name
+            /* 落在两档节目之间的空档（广告 / 无节目）时，沿用刚结束的那档 —— 
+               比直接显示「—」有用得多，也不会因为空档闪一下把名字清掉 */
+            val l = latest
+            if (p.start <= now && (l == null || p.start > l.start)) latest = p
         }
-        return null
+        return latest?.name
     }
 
     private fun list(pid: String, date: String): List<Prog>? {
