@@ -281,7 +281,6 @@ class MainActivity : Activity() {
                     awaitingReady = false
                     failState = false
                     cancelBackup()
-                    cancelRouteFallback()
                     hideCurtain()
                 }
             }
