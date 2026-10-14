@@ -357,6 +357,15 @@
   /* ------------------------------------------------------------------
    * 回报原生层
    * ------------------------------------------------------------------ */
+  /* 记录页面里冒出来的 JS 错误 —— 真机排查时这是屏幕上唯一能看到的线索 */
+  var lastError = '';
+  window.addEventListener('error', function (e) {
+    try {
+      var m = (e && (e.message || (e.error && e.error.message))) || 'unknown';
+      lastError = String(m).slice(0, 46);
+    } catch (x) {}
+  }, true);
+
   var lastSentProgram = '';
   var lastSentAt = 0;
 
@@ -501,6 +510,37 @@
         hidden: document.querySelectorAll('[data-htv-hidden="1"]').length,
         hash: window.location.hash || ''
       });
+    },
+
+    /*
+     * 给黑遮罩用的诊断串。
+     * 主源超时时原生层会把它念出来显示在屏幕上 —— 电视上没有日志可看，
+     * 用户截一张图就能知道到底卡在哪一环。
+     */
+    diagnose: function () {
+      var out = [];
+      try {
+        out.push('页 ' + (window.location.pathname || '?') + (window.location.search || ''));
+      } catch (e) { out.push('页 ?'); }
+
+      try {
+        var n = document.querySelectorAll('video').length;
+        var v = currentPlayer || document.querySelector('video');
+        var d = '无';
+        if (v) {
+          d = '就绪' + (v.readyState || 0) + (v.paused ? '/暂停' : '/播放') +
+              ' ' + (v.videoWidth || 0) + 'x' + (v.videoHeight || 0);
+        }
+        out.push('video ' + n + '个 ' + d);
+      } catch (e) { out.push('video 读取失败'); }
+
+      try {
+        out.push('脚本' + (window.__HTV__ ? '在' : '丢') +
+                 ' 清' + document.querySelectorAll('[data-htv-hidden="1"]').length +
+                 ' 错' + (lastError || '无'));
+      } catch (e) {}
+
+      return out.join('\n');
     }
   };
 

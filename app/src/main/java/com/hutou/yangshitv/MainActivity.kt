@@ -319,7 +319,8 @@ class MainActivity : Activity() {
 
         curtainHint = TextView(this)
         curtainHint.setTextColor(0xFF8A8A8A.toInt())
-        curtainHint.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(28).toFloat())
+        /* 32 不是随便定的：这行还要显示诊断信息，太小了用户截图看不清 */
+        curtainHint.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(32).toFloat())
         curtainHint.gravity = Gravity.CENTER
         curtainHint.setLineSpacing(px(10).toFloat(), 1f)
         val lp = LinearLayout.LayoutParams(WC, WC)
@@ -448,23 +449,59 @@ class MainActivity : Activity() {
         backupTask = Runnable {
             if (seq != switchSeq || !awaitingReady) return@Runnable
 
+            /*
+             * 电视上没有 logcat 可看，用户只能说「黑的」。
+             * 所以超时的同时把页面真实状态念到屏幕上 —— 截一张图就知道卡在哪一环。
+             */
             if (ch.backup.isEmpty()) {
                 failState = true
-                curtainHint.text = "加载超时。\n按【OK】重试   ·   按【返回】换台"
-                return@Runnable
+                captureDiagnose("加载超时。\n按【OK】重试   ·   按【返回】换台")
+            } else {
+                web.loadUrl(ch.backup)
+                captureDiagnose("主源超时，正在切换备用源…")
             }
-
-            curtainHint.text = "主源超时，正在切换备用源…"
-            web.loadUrl(ch.backup)
 
             /* 备用源再给 20 秒 */
             backupTask = Runnable {
                 if (seq == switchSeq && awaitingReady && !failState) {
                     failState = true
-                    curtainHint.text = "备用源也没能出画面。\n按【OK】重试   ·   按【返回】换台"
+                    captureDiagnose("备用源也没能出画面。\n按【OK】重试   ·   按【返回】换台")
                 }
             }.also { ui.postDelayed(it, 20_000) }
         }.also { ui.postDelayed(it, 20_000) }
+    }
+
+    /**
+     * 抓一次页面诊断，显示在黑遮罩上。
+     *
+     * 为什么要有这个：v1.0.0 那次黑屏排查全靠猜 —— 电视上既没有 logcat，
+     * 也连不上调试器，用户能给的只有「一张黑屏截图」。
+     * 这里把页面的 URL、video 个数与状态、注入脚本在不在、有没有 JS 报错
+     * 直接打到屏幕上，截图一发就知道问题出在哪一环。
+     */
+    private fun captureDiagnose(base: String) {
+        curtainHint.text = base
+        evalJs(
+            "(function(){try{return window.__HTV__?window.__HTV__.diagnose():" +
+                    "'脚本未注入 | video='+document.querySelectorAll('video').length+" +
+                    "' | '+document.title}catch(e){return '诊断失败:'+e.message}})()"
+        ) { r ->
+            val d = unquoteJs(r)
+            if (d.isNotEmpty()) curtainHint.text = base + "\n\n" + d
+        }
+    }
+
+    /** evaluateJavascript 回调给的是 JSON 编码过的字符串，去掉外层引号与转义 */
+    private fun unquoteJs(s: String?): String {
+        if (s == null) return ""
+        var t = s.trim()
+        if (t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+            t = t.substring(1, t.length - 1)
+        }
+        return t.replace("\\u003C", "<")
+            .replace("\\n", "\n")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
     }
 
     private fun cancelBackup() {
