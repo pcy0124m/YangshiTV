@@ -24,6 +24,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.Executors
 
 /**
  * 电视直播壳。
@@ -105,6 +106,34 @@ class MainActivity : Activity() {
         enterFullscreen()
 
         checkEngineThenStart()
+        loadAllPrograms()
+    }
+
+    /**
+     * 后台把 48 个台的「正在播什么」拉回来，填进频道列表。
+     *
+     * 为什么要单独走接口：网页一次只加载一个频道，从页面里根本拿不到别的台的节目。
+     * 数据源是央视频自己的 EPG 接口（细节见 Epg.kt），不带签名、一次 3 KB。
+     *
+     * 4 个并发、单个失败就跳过，全程不阻塞界面 —— 电视上首屏出画面比什么都重要。
+     */
+    private fun loadAllPrograms() {
+        if (channels.isEmpty()) return
+        val date = Epg.today()
+        val list = channels
+
+        val pool = Executors.newFixedThreadPool(4) { r ->
+            Thread(r, "epg").apply { isDaemon = true }
+        }
+        for ((i, ch) in list.withIndex()) {
+            val idx = i
+            val pid = ch.pid
+            pool.execute {
+                val name = Epg.currentName(pid, date) ?: return@execute
+                ui.post { overlay.setProgram(idx, name) }
+            }
+        }
+        pool.shutdown()
     }
 
     override fun onResume() {

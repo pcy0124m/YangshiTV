@@ -3,6 +3,7 @@ package com.hutou.yangshitv
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -147,6 +148,7 @@ class ChannelOverlay(context: Context) : FrameLayout(context) {
                 progTv.setTextColor(COLOR_DIM)
                 progTv.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(22).toFloat())
                 progTv.maxLines = 1
+                progTv.ellipsize = TextUtils.TruncateAt.END
                 progTv.setPadding(0, px(6), 0, 0)
                 col.addView(progTv)
 
@@ -163,14 +165,25 @@ class ChannelOverlay(context: Context) : FrameLayout(context) {
                 rows.add(row); noViews.add(noTv); nameViews.add(nameTv); progViews.add(progTv)
             }
             refreshHighlight()
+
+            /*
+             * 行是 panel.post 里才真正建出来的，而节目单是从网络来的 —— 谁先到不一定。
+             * 要是节目名比行先到，setProgram 那会儿 progViews 还是空的，名字就丢了。
+             * 这里补写一遍。
+             */
+            for ((idx, p) in programs) {
+                if (idx in progViews.indices && !p.isNullOrEmpty()) {
+                    progViews[idx].text = p
+                }
+            }
         }
     }
 
-    /** 页面回传的「正在播什么」写进对应行 */
+    /** 页面回传 / 网络查到的「正在播什么」写进对应行 */
     fun setProgram(index: Int, program: String) {
         programs[index] = program
         if (index in progViews.indices) {
-            progViews[index].text = if (program.isNullOrEmpty()) "—" else program
+            progViews[index].text = if (program.isEmpty()) "—" else program
         }
     }
 
