@@ -1,0 +1,7 @@
+# 统一用 LF，避免 Windows 下拉下来的脚本带 CRLF 出玄学问题
+* text=auto eol=lf
+
+*.png binary
+*.jar binary
+*.keystore binary
+*.jks binary
